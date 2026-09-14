@@ -7,8 +7,9 @@ from pathlib import Path
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import cm
+from reportlab.lib import colors
 from reportlab.platypus import (PageBreak, Paragraph, Preformatted,
-                                SimpleDocTemplate, Spacer)
+                                SimpleDocTemplate, Spacer, Table, TableStyle)
 
 OUT = Path(__file__).with_name("report.pdf")
 
@@ -42,6 +43,67 @@ def P(t, s=BODY):
 
 def B(t):
     return Paragraph(t, BUL, bulletText="•")
+
+
+CELL = ParagraphStyle("Cell", parent=BODY, fontSize=8.4, leading=10.2, spaceAfter=0)
+CELLH = ParagraphStyle("CellH", parent=CELL, fontName="Helvetica-Bold")
+
+
+def T(rows, widths):
+    data = [[Paragraph(c, CELLH) for c in rows[0]]] + [[Paragraph(str(c), CELL) for c in r] for r in rows[1:]]
+    t = Table(data, colWidths=widths, repeatRows=1)
+    t.setStyle(TableStyle([
+        ("LINEBELOW", (0, 0), (-1, 0), 0.7, colors.black),
+        ("LINEBELOW", (0, 1), (-1, -1), 0.25, colors.HexColor("#BBBBBB")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    return t
+
+
+CVES = [
+    ["CVE", "Name", "Severity", "CVSS", "Conf.", "Quality", "Sources", "Verified"],
+    ["CVE-2021-44228", "Log4Shell", "critical", "10.0", "0.97", "1.0", "2", "yes"],
+    ["CVE-2021-45046", "Log4j follow-up", "critical", "9.0", "0.97", "1.0", "2", "yes"],
+    ["CVE-2014-6271", "Shellshock", "critical", "9.8", "0.97", "0.9", "2", "yes"],
+    ["CVE-2019-0708", "BlueKeep", "critical", "9.8", "0.97", "1.0", "2", "yes"],
+    ["CVE-2022-22965", "Spring4Shell", "critical", "9.8", "0.97", "1.0", "2", "yes"],
+    ["CVE-2017-0144", "EternalBlue", "high", "8.8", "0.97", "1.0", "2", "yes"],
+    ["CVE-2021-34527", "PrintNightmare", "high", "8.8", "0.97", "1.0", "2", "yes"],
+    ["CVE-2023-4863", "libwebp", "high", "8.8", "0.97", "1.0", "2", "yes"],
+    ["CVE-2014-0160", "Heartbleed", "high", "7.5", "0.97", "0.9", "2", "yes"],
+    ["CVE-2023-44487", "HTTP/2 Rapid Reset", "high", "7.5", "0.97", "1.0", "2", "yes"],
+    ["CVE-2020-1472", "Zerologon", "medium", "5.5", "0.97", "1.0", "2", "yes"],
+]
+RUNS = [
+    ["Run", "NVD", "CIRCL", "Outcome"],
+    ["1", "HTTP 503 on all 11", "6 ok, 5 x HTTP 429", "6 single-source rows (conf 0.5, unverified), 5 no consensus, 16 errors logged"],
+    ["2", "11 ok", "8 ok, 3 x HTTP 429", "8 verified, 3 single-source, 3 errors logged"],
+    ["3 (final)", "11 ok", "11 ok", "11 verified, 0 errors"],
+]
+API = [
+    ["Request", "Status", "Notes"],
+    ["GET /v1/security/cve?cve=CVE-2021-44228", "200", "cvss 10.0, age 114 s, stale false, verified true, latency 73 ms, warnings []"],
+    ["GET /v1/security/cve?cve=CVE-1999-0001", "404", "{\"error\":{\"code\":\"cve_not_found\", ...}, \"meta\":{...}}"],
+]
+TTL = [
+    ["Run", "TTL", "Rollups written", "Rows purged", "Consensus marked stale"],
+    ["Demonstration", "1 s", "22", "22", "11"],
+    ["Final (normal)", "3600 s", "0", "0", "0"],
+]
+TESTS = [
+    ["File", "Tests", "Covers"],
+    ["tests/test_consensus.py", "6", "agreement, disagreement, single source, total failure, severity bands, quality"],
+    ["tests/test_api.py", "6", "exact schema shape, verified, 404, stale, fresh, single-source"],
+    ["tests/test_sla.py", "4", "p95 &lt; 200 ms (60 requests), failover x2, 200-request availability"],
+]
+DBSTATE = [
+    ["Table", "Contents after the final run"],
+    ["raw_ingests", "NVD 11 rows (178 kB), CIRCL 11 rows (90 kB), plus 11 NVD:SUMMARY and 11 CIRCL:SUMMARY rollup rows from the TTL demonstration"],
+    ["ingestion_errors", "CIRCL / rate_limited x 3 (from run 2)"],
+    ["request_log", "534 x HTTP 200 (avg 2 ms, max 101 ms); 3 x HTTP 404 (avg 35 ms)"],
+]
 
 
 story = [
@@ -150,6 +212,35 @@ story = [
     P("<b>Limits of the AI’s contribution.</b> The AI did not choose the task, the providers "
       "or the trust model; it did not have access to the internet beyond the two public APIs the "
       "code calls. All generated code was read and run by me before submission."),
+
+    PageBreak(),
+
+    P("Appendix — Results of the final end-to-end run (14 Sep 2026)", H2),
+    P("Environment: Windows 10, Python 3.13, PostgreSQL 16.10 (native). Commands as in README.md, "
+      "run in order. Full detail in <font face='Courier'>docs/res.md</font>."),
+
+    P("<b>A1. Live ingestion</b> — 11 watchlist CVEs, both providers queried live. "
+      "Summary: processed 11, consensus_written 11, no_consensus 0, errors 0. "
+      "Quality 0.9 on two rows: CIRCL carries no product list for those older CVEs."),
+    T(CVES, [2.6*cm, 3.1*cm, 1.6*cm, 1.2*cm, 1.2*cm, 1.4*cm, 1.5*cm, 1.5*cm]),
+    Spacer(1, 6),
+    P("<b>A2. Provider behaviour across the three runs that day.</b> Every failure was written to "
+      "<font face='Courier'>ingestion_errors</font> and surfaced as a lower-confidence row with an "
+      "explicit warning — no silent fallback."),
+    T(RUNS, [1.8*cm, 3.2*cm, 3.2*cm, 8.8*cm]),
+    Spacer(1, 6),
+    P("<b>A3. API.</b> Envelope matched the Section 3 schema exactly."),
+    T(API, [6.6*cm, 1.4*cm, 9.0*cm]),
+    Spacer(1, 6),
+    P("<b>A4. TTL / lifecycle worker.</b> The 1-second run proves the mechanism (one rollup per purged "
+      "CVE/source group); the normal run purged nothing because all raw rows were younger than the TTL."),
+    T(TTL, [3.2*cm, 1.8*cm, 3.4*cm, 3.0*cm, 5.6*cm]),
+    Spacer(1, 6),
+    P("<b>A5. Test suite</b> — 16 passed, 0 failed, 0 skipped, 2.80 s."),
+    T(TESTS, [4.4*cm, 1.4*cm, 11.2*cm]),
+    Spacer(1, 6),
+    P("<b>A6. Database state after the run.</b>"),
+    T(DBSTATE, [3.4*cm, 13.6*cm]),
 ]
 
 doc = SimpleDocTemplate(str(OUT), pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm,
