@@ -2,7 +2,8 @@
 
 | File | Answers |
 |------|---------|
-| `report.md` | The deliverable report — (1) system architecture in plain terms, (2) AI-use template to fill in. |
+| `report.md` | Report source (Markdown). |
+| `report.pdf` | **The deliverable 2-page report** (page 1 architecture, page 2 AI use). Rebuild with `build_report_pdf.py`. |
 | `assignment/assignment.pdf` | The original assignment brief (reference). |
 | `assignment/data_catalog.csv` | The provided task catalog; this project implements row #23 (CVE intelligence). |
 
