@@ -86,3 +86,31 @@ HTTP 404
 HTTP 200
 ==============================================================================
 {"openapi":"3.1.0","info":{"title":"Outage Intelligence API","version":"1.0.0"},"paths":{"/v1/energy/outages":{"get":{"summary":"Get Outages","operationId":"get_outages_v1_energy_outages_get","parameters":[{"name":"region","in":"query","required":true,"schema":{"type":"string","description":"Region code, e.g. TX","title":"Region"},"description":"Region code, e.g. TX"},{"name":"area","in":"query","required":false,"schema":{"anyOf":[{"type":"string"},{"type":"null"}],"description":"Optional county filter, e.g. Harris","title":"Area"},"description":"Optional county filter, e.g. Harris"},{"name":"min_customers","in":"query","required":false,"schema":{"type":"integer","minimum":0,"description":"Only areas with at least this many customers out","default":1,"title":"Min Customers"},"description":"Only areas with at least this many customers out"},{"name":"limit","in":"query","required":false,"schema":{"type":"integer","maximum":500,"minimum":1,"default":50,"title":"Limit"}}],"responses":{"200":{"description":"Successful Response","content":{"application/json":{"schema":{}}}},"422":{"description":"Validation Error","content":{"application/json":{"schema":{"$ref":"#/components/schemas/HTTPValidationError"}}}}}}}},"components":{"schemas":{"HTTPValidationError":{"properties":{"detail":{"items":{"$ref":"#/components/schemas/ValidationError"},"type":"array","title":"Detail"}},"type":"object","title":"HTTPValidationError"},"ValidationError":{"properties":{"loc":{"items":{"anyOf":[{"type":"string"},{"type":"integer"}]},"type":"array","title":"Location"},"msg":{"type":"string","title":"Message"},"type":{"type":"string","title":"Error Type"}},"type":"object","required":["loc","msg","type"],"title":"ValidationError"}}}}
+
+==============================================================================
+9. TTL / LIFECYCLE WORKER  (cmd, after stopping the API with Ctrl+C)
+==============================================================================
+> .venv\Scripts\python.exe -m app.ttl
+=== ttl lifecycle summary ===
+{
+  "rollup_rows_upserted": 0,
+  "snapshots_purged": 0,
+  "raw_rows_purged": 0,
+  "snapshots_marked_stale": 0
+}
+(all zero because nothing had aged past its TTL - raw 6 h, snapshots 24 h, freshness 15 min)
+
+==============================================================================
+10. TEST SUITE  (cmd)
+==============================================================================
+> .venv\Scripts\python.exe -m pytest -v
+platform win32 -- Python 3.12.10, pytest-8.3.4, pluggy-1.6.0
+collected 41 items
+
+tests/test_api.py        9 PASSED  (schema shape, filters, 404s, stale/fresh, unverified, rate-limit 429)
+tests/test_consensus.py 12 PASSED  (clustering, outliers, tiebreak, floor, failover, quality)
+tests/test_sla.py        7 PASSED  (p95 < 200 ms, 200-request availability, failover x3, TTL rollup/purge, stale)
+tests/test_sources.py   13 PASSED  (all parsers on fixtures, home-county fallback, bad-schema, raw page round-trip)
+
+======================== 41 passed, 1 warning in 4.20s ========================
+(the warning is a DeprecationWarning inside starlette/testclient.py, not project code)
