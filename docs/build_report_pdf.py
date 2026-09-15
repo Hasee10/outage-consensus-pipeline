@@ -100,7 +100,7 @@ TTL = [
 TESTS = [
     ["File", "Tests", "Covers"],
     ["tests/test_consensus.py", "12", "clustering, outlier rejection, first-hand tiebreak, floor, single source, total disagreement, failed-source warnings, quality"],
-    ["tests/test_sources.py", "12", "every parser on captured fixtures; bad-schema errors; county-name unification"],
+    ["tests/test_sources.py", "13", "every parser on captured fixtures; home-county fallback; bad-schema errors; county-name unification"],
     ["tests/test_api.py", "8", "exact envelope, filters, both 404 shapes, stale/fresh, unverified served honestly"],
     ["tests/test_sla.py", "7", "p95 &lt; 200 ms (60 req), 200-request availability, failover ×3, TTL rollup+purge, stale marking"],
 ]
@@ -182,7 +182,7 @@ story = [
       "with the API in a minute-wise manner.”"),
     B("“Run the TTL worker once more and add the above results in a structured manner in res.md.”"),
     P("<b>What I verified and changed myself.</b>"),
-    B("Confirmed all 39 tests pass and the served payload matches the required envelope exactly "
+    B("Confirmed all 40 tests pass and the served payload matches the required envelope exactly "
       "(data + meta: provenance, freshness, trust, license, api, warnings), including both 404 shapes."),
     B("Verified live consensus on real data: Williamson County reported as 400 by Oncor’s own map and "
       "outage-pro but 121 by two lagging aggregators — the first-hand vote resolved it to 400, verified, "
@@ -216,7 +216,7 @@ story = [
       "purged nothing because everything was younger than its TTL."),
     T(TTL, [3.4 * cm, 3.4 * cm, 2.2 * cm, 3.0 * cm, 2.2 * cm, 2.6 * cm]),
     Spacer(1, 5),
-    P("<b>A5. Test suite</b> — 39 passed, 0 failed, 0 skipped, 3.6 s."),
+    P("<b>A5. Test suite</b> — 40 passed, 0 failed, 0 skipped, 3.9 s."),
     T(TESTS, [4.2 * cm, 1.3 * cm, 11.5 * cm]),
     Spacer(1, 5),
     P("<b>A6. Database state after the run.</b>"),

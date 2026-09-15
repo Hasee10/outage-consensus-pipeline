@@ -69,6 +69,11 @@ KUBRA = {
 }
 KUBRA_BASE = "https://kubra.io"
 
+# Utilities whose service area is (essentially) one county and whose Kubra
+# instance publishes district/ZIP layers but no county layer. Their total is
+# attributed to this county when no county layer is available.
+HOME_COUNTY = {"AUSTIN_ENERGY": "Travis", "CPS": "Bexar"}
+
 AGGREGATOR_URLS = {
     "OUTAGE_PRO":    "https://outage-pro.com/outages/texas",
     "OUTAGE_ONLINE": "https://outage.online/texas/",

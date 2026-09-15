@@ -155,15 +155,19 @@ def fetch_kubra(source_id: str) -> dict:
 
     # The county layer is one of thematic-1..3 (which one differs per utility);
     # Kubra only publishes them while outages exist, so 404 is legitimate.
-    county_layer = None
+    county_layer = other_layer = None
     for i in (1, 2, 3):
         layer = _get(f"{config.KUBRA_BASE}/{data_path}/public/thematic-{i}/thematic_areas.json",
                      expect_json=True, allow_404=True)
-        if layer and any(str(a.get("id", "")).endswith("|county") for a in layer.get("file_data", [])):
+        if not layer:
+            continue
+        if any(str(a.get("id", "")).endswith("|county") for a in layer.get("file_data", [])):
             county_layer = layer
             break
+        other_layer = other_layer or layer          # district / ZIP layer
 
-    return {"currentState": state, "summary": summary, "county_layer": county_layer}
+    return {"currentState": state, "summary": summary, "county_layer": county_layer,
+            "other_layer": other_layer}
 
 
 def parse_kubra(source_id: str, raw: dict) -> dict:
@@ -191,6 +195,17 @@ def parse_kubra(source_id: str, raw: dict) -> dict:
                 }
             except (KeyError, TypeError) as exc:
                 raise SourceSchemaError(f"unexpected Kubra county schema: {exc}") from exc
+    elif out > 0 and source_id in config.HOME_COUNTY:
+        # Single-county utility (e.g. Austin Energy) publishes district/ZIP
+        # layers only: attribute its total to its home county, taking the
+        # restoration estimate from whichever layer it did publish.
+        etrs = [_iso(a.get("desc", {}).get("etr"))
+                for a in (raw.get("other_layer") or {}).get("file_data", [])]
+        etrs = [e for e in etrs if e]
+        areas[config.HOME_COUNTY[source_id]] = {
+            "out": out, "tracked": tracked, "etr": max(etrs) if etrs else None,
+            "n_out": _int(totals.get("total_outages")),
+        }
     elif out > 0:
         # Outages exist but no county breakdown was published: that is a
         # real data-quality failure, not something to paper over.

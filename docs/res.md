@@ -56,7 +56,8 @@ confidence 0.93, verified**, laggards listed as rejected.
 | 2 | utility first-hand vote + floor added | conf 0.54 — 2-vs-2 splits still unresolved by the median rule |
 | 3 | usoutage county list parsed (3rd vote) | conf 0.85, verified |
 | 4 | median rule → weighted clustering | conf 0.90, verified; Williamson resolved correctly |
-| 5 (final) | outage-pro parser fixed for `<0.01%` rows (254/254 counties) | conf 0.88, verified, 0 errors |
+| 5 | outage-pro parser fixed for `<0.01%` rows (254/254 counties) | conf 0.88, verified, 0 errors |
+| 6 (later that day) | Austin Energy developed outages and, having no county layer, was reported as `bad_schema` — exactly as designed (named in warnings, snapshot still verified from the other six). Fix: single-county utilities (Austin → Travis, CPS → Bexar) now attribute their total to the home county with the ETA from their ZIP/district layer. | 7/7 ok, 40 tests |
 
 No source failed during any pass today, so `ingestion_errors` is empty; the
 failover paths are exercised by the test suite instead.
@@ -87,12 +88,12 @@ run purged nothing because everything was younger than its TTL.
 
 ## 5. Test suite (`py -m pytest -v`)
 
-**39 passed, 0 failed, 0 skipped — 3.6 s**
+**40 passed, 0 failed, 0 skipped — 3.9 s**
 
 | File | Tests | Covers |
 |------|------:|--------|
 | `tests/test_consensus.py` | 12 | clustering rule, outlier rejection, first-hand tiebreak, single source, total disagreement, floor, partial first-hand counts, failed-source warnings, no-snapshot, quality |
-| `tests/test_sources.py` | 12 | all four parser families on captured fixtures; bad-schema errors; county-name unification; storage shape |
+| `tests/test_sources.py` | 13 | all four parser families on captured fixtures; home-county fallback; bad-schema errors; county-name unification; storage shape |
 | `tests/test_api.py` | 8 | exact envelope, filters, case-insensitive area, both 404 shapes, stale/fresh, unverified served honestly |
 | `tests/test_sla.py` | 7 | p95 < 200 ms (60 req), 200-request availability, failover ×3, TTL rollup+purge, stale marking |
 

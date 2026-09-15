@@ -63,6 +63,18 @@ def test_parse_kubra_no_outages_no_layer_is_fine():
     assert n["areas"] == {} and n["utilities"]["Austin Energy"]["out"] == 0
 
 
+def test_parse_kubra_single_county_utility_uses_home_county():
+    summary = {"summaryFileData": {"totals": [{"total_cust_a": {"val": 40}, "total_cust_s": 591919,
+                                               "total_outages": 2}],
+                                   "date_generated": "2026-09-15T13:20:00Z"}}
+    zips = {"file_data": [
+        {"id": "TX|78701|zip", "desc": {"name": "78701", "cust_a": {"val": 30}, "etr": "2026-09-15T14:25:22Z"}},
+        {"id": "TX|78702|zip", "desc": {"name": "78702", "cust_a": {"val": 10}, "etr": "2026-09-15T16:00:00Z"}},
+    ]}
+    n = sources.parse_kubra("AUSTIN_ENERGY", {"summary": summary, "county_layer": None, "other_layer": zips})
+    assert n["areas"] == {"Travis": {"out": 40, "tracked": 591919, "etr": "2026-09-15T16:00:00Z", "n_out": 2}}
+
+
 def test_parse_kubra_outages_without_layer_is_an_error():
     with pytest.raises(sources.SourceSchemaError):
         sources.parse_kubra("ONCOR", {"summary": KUBRA_SUMMARY, "county_layer": None})
