@@ -1,1 +1,1 @@
-"""CVE Intelligence Pipeline — data sourcing, consensus, and serving."""
+"""Texas power-outage consensus pipeline — data sourcing, consensus, and serving."""
