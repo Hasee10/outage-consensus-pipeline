@@ -128,13 +128,15 @@ curl "http://127.0.0.1:8000/v1/energy/outages?region=TX&min_customers=100&limit=
   summarised into `area_rollups` (per region/county/hour: samples, max, avg,
   min confidence) before deletion; aged snapshots are flagged stale.
 - **API reads only Postgres**, via a connection pool — p95 < 200 ms asserted.
+- **Rate limit enforced.** The advertised 100 requests / 60 s is applied per
+  client IP with a clean `429` error object and `Retry-After` header
+  (`RATE_LIMIT_ENFORCE=0` disables it).
 - **Storage.** JSON sources are stored verbatim; HTML sources are stored as the
-  extracted micro-data plus a page fingerprint (bytes + sha256), not 500 kB of
-  markup per pass.
+  raw page (gzip + base64, ~60 kB) plus the extracted micro-data and a sha256,
+  so the audit trail can reproduce exactly what the parser saw.
 
 ## Known limitations
 
-- The reported `rate_limit` is advertised metadata; the API does not throttle.
 - Aggregators poll utilities on their own schedules, so they routinely lag by
   10–40 minutes — this is the disagreement the consensus rule exists to handle.
 - Only Texas is wired up; adding a region means adding its sources to

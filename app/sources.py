@@ -18,6 +18,8 @@ here falls back to cached or partial data.
 """
 from __future__ import annotations
 
+import base64
+import gzip
 import hashlib
 import html as htmllib
 import re
@@ -221,9 +223,18 @@ def parse_kubra(source_id: str, raw: dict) -> dict:
 # Aggregators (HTML)                                                           #
 # --------------------------------------------------------------------------- #
 def _html_envelope(html: str) -> dict:
-    """What we persist for an HTML source: the page fingerprint, not 500 kB."""
-    return {"html_bytes": len(html.encode("utf-8")),
-            "sha256": hashlib.sha256(html.encode("utf-8")).hexdigest()}
+    """What we persist for an HTML source: the raw page verbatim (gzip +
+    base64, ~10x smaller than the markup) plus its size and sha256, so the
+    audit trail can reproduce exactly what the parser saw."""
+    raw = html.encode("utf-8")
+    return {"html_bytes": len(raw),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "html_gzip_b64": base64.b64encode(gzip.compress(raw)).decode("ascii")}
+
+
+def raw_html_from_payload(payload: dict) -> str:
+    """Inverse of _html_envelope for a stored raw_ingests row."""
+    return gzip.decompress(base64.b64decode(payload["page"]["html_gzip_b64"])).decode("utf-8")
 
 
 def fetch_outage_pro() -> dict:
@@ -339,7 +350,7 @@ ADAPTERS = {
 
 def storable_payload(source_id: str, raw: dict, normalized: dict) -> dict:
     """Raw JSON sources are stored verbatim. HTML sources are stored as the
-    extracted micro-data plus a fingerprint of the page (size + sha256)."""
+    raw page (compressed) plus the micro-data extracted from it."""
     if config.SOURCES[source_id]["kind"] == "utility":
         return raw
     return {"extracted": {k: v for k, v in normalized.items() if k != "raw_meta"},

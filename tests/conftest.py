@@ -25,6 +25,9 @@ TEST_REGION = "ZZ"
 @pytest.fixture(scope="session", autouse=True)
 def _register_test_region():
     config.REGIONS[TEST_REGION] = "Test Region"
+    # SLA tests fire hundreds of requests from one client; the limiter is
+    # exercised by its own dedicated test (see test_api.py).
+    config.RATE_LIMIT_ENFORCE = False
     yield
     config.REGIONS.pop(TEST_REGION, None)
 

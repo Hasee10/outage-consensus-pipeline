@@ -124,4 +124,6 @@ def test_storable_payload_keeps_json_verbatim_but_fingerprints_html():
     assert sources.storable_payload("ONCOR", raw_json, {}) is raw_json
     n = sources.parse_usoutage({"html": USOUTAGE_HTML})
     stored = sources.storable_payload("USOUTAGE", {"html": USOUTAGE_HTML}, n)
-    assert set(stored) == {"extracted", "page"} and set(stored["page"]) == {"html_bytes", "sha256"}
+    assert set(stored) == {"extracted", "page"}
+    assert set(stored["page"]) == {"html_bytes", "sha256", "html_gzip_b64"}
+    assert sources.raw_html_from_payload(stored) == USOUTAGE_HTML     # raw page round-trips

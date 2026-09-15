@@ -5,6 +5,7 @@ DB-backed — skipped automatically if Postgres is unreachable (see conftest).
 from __future__ import annotations
 
 from app import config
+from app.main import reset_rate_limiter
 from tests.conftest import TEST_REGION
 
 
@@ -102,3 +103,18 @@ def test_unverified_snapshot_is_served_as_unverified(client, seed):
     meta = client.get(config.ENDPOINT_PATH, params={"region": TEST_REGION}).json()["meta"]
     assert meta["trust"]["verified"] is False
     assert len(meta["provenance"]) == 1 and meta["warnings"]
+
+
+def test_rate_limit_is_enforced_with_clean_429(client, seed, monkeypatch):
+    seed()
+    monkeypatch.setattr(config, "RATE_LIMIT_ENFORCE", True)
+    reset_rate_limiter()
+    for _ in range(config.RATE_LIMIT["limit"]):
+        assert client.get(config.ENDPOINT_PATH, params={"region": TEST_REGION}).status_code == 200
+    resp = client.get(config.ENDPOINT_PATH, params={"region": TEST_REGION})
+    assert resp.status_code == 429
+    body = resp.json()
+    assert body["error"]["code"] == "rate_limited" and body["error"]["retry_after_seconds"] >= 1
+    assert "retry-after" in {k.lower() for k in resp.headers}
+    assert body["meta"]["product_id"] == config.PRODUCT_ID
+    reset_rate_limiter()

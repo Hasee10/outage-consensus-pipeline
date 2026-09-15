@@ -34,8 +34,9 @@ SNAPSHOT_TTL_SECONDS = int(os.getenv("SNAPSHOT_TTL_SECONDS", "86400"))  # 24 h
 # Ingestion loop cadence (well under TTL_SECONDS).
 INGEST_INTERVAL_SECONDS = float(os.getenv("INGEST_INTERVAL_SECONDS", "300"))
 
-# --- Rate limit reported in the API payload (metadata only) ---
+# --- Rate limit: advertised in the payload AND enforced per client IP ---
 RATE_LIMIT = {"limit": 100, "window_seconds": 60}
+RATE_LIMIT_ENFORCE = os.getenv("RATE_LIMIT_ENFORCE", "1") == "1"
 
 # --- Source registry --------------------------------------------------------
 # kind: "utility" = the electric company's own outage map (first-hand data);

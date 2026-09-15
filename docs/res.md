@@ -90,20 +90,20 @@ run purged nothing because everything was younger than its TTL.
 
 ## 5. Test suite (`py -m pytest -v`)
 
-**40 passed, 0 failed, 0 skipped — 3.9 s**
+**41 passed, 0 failed, 0 skipped — 4.4 s**
 
 | File | Tests | Covers |
 |------|------:|--------|
 | `tests/test_consensus.py` | 12 | clustering rule, outlier rejection, first-hand tiebreak, single source, total disagreement, floor, partial first-hand counts, failed-source warnings, no-snapshot, quality |
 | `tests/test_sources.py` | 13 | all four parser families on captured fixtures; home-county fallback; bad-schema errors; county-name unification; storage shape |
-| `tests/test_api.py` | 8 | exact envelope, filters, case-insensitive area, both 404 shapes, stale/fresh, unverified served honestly |
+| `tests/test_api.py` | 9 | exact envelope, filters, case-insensitive area, both 404 shapes, stale/fresh, unverified served honestly, rate limit → clean 429 |
 | `tests/test_sla.py` | 7 | p95 < 200 ms (60 req), 200-request availability, failover ×3, TTL rollup+purge, stale marking |
 
 ## 6. Database state after the run
 
 | Table | Contents |
 |-------|----------|
-| `raw_ingests` | 7 rows (one per source, latest pass): Oncor JSON 58 kB, CPS 9 kB, TNMP 3 kB, Austin 1.6 kB; aggregators stored as extracted data + page fingerprint (4–6 kB each) |
+| `raw_ingests` | 7 rows (one per source, latest pass): Oncor JSON 58 kB, CPS 9 kB, TNMP 3 kB, Austin 1.6 kB; aggregators stored as raw page (gzip+base64) + extracted data (~60 kB each) |
 | `consensus_snapshots` | 1 (newest), `stale = false` |
 | `area_rollups` | 276 rows, 143 counties |
 | `ingestion_errors` | 1 (AUSTIN_ENERGY · bad_schema, run 6 — see above) |

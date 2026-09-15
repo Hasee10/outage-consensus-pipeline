@@ -101,12 +101,12 @@ TESTS = [
     ["File", "Tests", "Covers"],
     ["tests/test_consensus.py", "12", "clustering, outlier rejection, first-hand tiebreak, floor, single source, total disagreement, failed-source warnings, quality"],
     ["tests/test_sources.py", "13", "every parser on captured fixtures; home-county fallback; bad-schema errors; county-name unification"],
-    ["tests/test_api.py", "8", "exact envelope, filters, both 404 shapes, stale/fresh, unverified served honestly"],
+    ["tests/test_api.py", "9", "exact envelope, filters, both 404 shapes, stale/fresh, unverified served honestly, rate limit 429"],
     ["tests/test_sla.py", "7", "p95 &lt; 200 ms (60 req), 200-request availability, failover ×3, TTL rollup+purge, stale marking"],
 ]
 DBSTATE = [
     ["Table", "Contents after the final run"],
-    ["raw_ingests", "7 rows (latest pass): Oncor JSON 58 kB, CPS 9 kB, TNMP 3 kB, Austin 1.6 kB; aggregators as extracted data + page fingerprint (4–6 kB)"],
+    ["raw_ingests", "7 rows (latest pass): utility JSON verbatim (1.6–58 kB); aggregator pages raw (gzip) + extracted data (~60 kB)"],
     ["consensus_snapshots / area_rollups", "1 fresh snapshot; 276 rollup rows over 143 counties (peak 2,576 in Harris)"],
     ["ingestion_errors / request_log", "0 errors; 2,149 × HTTP 200 (avg 2 ms), 19 × HTTP 404 (avg 23 ms)"],
 ]
@@ -125,7 +125,7 @@ story = [
       "sources</b>:"),
     T(SOURCES, [6.2 * cm, 2.8 * cm, 8.0 * cm]),
     P("Every reply is saved to " + C % "raw_ingests" + " (JSONB) as an audit trail — JSON verbatim, HTML "
-      "as the extracted numbers plus a page fingerprint. A timeout, block, server error or unrecognised "
+      "as the raw page (compressed) plus the extracted numbers. A timeout, block, server error or unrecognised "
       "page is written explicitly to " + C % "ingestion_errors" + " and named in the snapshot’s warnings. "
       "Old data is never reused quietly and a failed fetch is never presented as a success."),
     P("<b>2. Consensus (the judge).</b> A <b>pure function</b> (" + C % "app/consensus.py" + ") turns the "
@@ -153,7 +153,8 @@ story = [
       + C % "data" + " (outages by county with customers affected, tracked, ETA, sources, confidence; "
       "utility-level figures; total; as_of) and " + C % "meta" + " (request id, product id, freshness "
       "with age/TTL/stale, provenance, trust, license, api, warnings). Unknown regions get a clean 404 "
-      "error object. Every request is logged."),
+      "error object; the advertised rate limit (100 / 60 s per client) is enforced with a clean 429. "
+      "Every request is logged."),
     Preformatted(DIAGRAM, CODE),
 
     PageBreak(),
@@ -216,7 +217,7 @@ story = [
       "purged nothing because everything was younger than its TTL."),
     T(TTL, [3.4 * cm, 3.4 * cm, 2.2 * cm, 3.0 * cm, 2.2 * cm, 2.6 * cm]),
     Spacer(1, 5),
-    P("<b>A5. Test suite</b> — 40 passed, 0 failed, 0 skipped, 3.9 s."),
+    P("<b>A5. Test suite</b> — 41 passed, 0 failed, 0 skipped, 4.4 s."),
     T(TESTS, [4.2 * cm, 1.3 * cm, 11.5 * cm]),
     Spacer(1, 5),
     P("<b>A6. Database state after the run.</b>"),

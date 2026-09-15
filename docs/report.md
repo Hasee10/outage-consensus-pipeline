@@ -18,8 +18,8 @@ Energy**, **Austin Energy**, **TNMP** (Kubra Storm Center JSON: customers out
 by county plus restoration estimates) — and three aggregator sites that read
 every Texas utility's map — **outage-pro.com**, **outage.online**,
 **usoutage.com** (HTML, scraped). Every reply is saved to `raw_ingests`
-(JSONB) as an audit trail: JSON verbatim, HTML as the extracted numbers plus a
-page fingerprint. If a source times out, is blocked, returns a server error or
+(JSONB) as an audit trail: JSON verbatim, HTML as the raw page (compressed)
+plus the extracted numbers. If a source times out, is blocked, returns a server error or
 sends a page the parser does not recognise, that failure is written explicitly
 to `ingestion_errors` and named in the snapshot's warnings. We never reuse old
 data quietly or present a failed fetch as a success.
@@ -57,7 +57,8 @@ so p95 latency stays far under 200 ms. It returns the standardized envelope:
 sources, confidence; utility-level figures; total; as_of) and `meta`
 (request id, product id, freshness with age/TTL/stale, provenance, trust,
 license, api latency and rate limit, warnings). Unknown regions and regions
-without a snapshot get a clean 404 error object. Every request is logged.
+without a snapshot get a clean 404 error object; the advertised rate limit
+(100 / 60 s per client) is enforced with a clean 429. Every request is logged.
 
 ```
  Oncor ─┐  CPS ─┐  Austin ─┐  TNMP ─┐          outage-pro ─┐ outage.online ─┐ usoutage ─┐

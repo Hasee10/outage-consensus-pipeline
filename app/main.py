@@ -4,17 +4,18 @@ GET /v1/energy/outages?region=TX[&area=Harris][&min_customers=1][&limit=50]
 
 Reads ONLY from Postgres (never calls a provider live). Emits the exact
 standardized response envelope from the assignment spec, logs every request
-to request_log, and returns a clean 404 for regions that are not tracked or
-have no snapshot yet.
+to request_log, enforces the advertised rate limit (clean 429), and returns a
+clean 404 for regions that are not tracked or have no snapshot yet.
 """
 from __future__ import annotations
 
 import time
 import uuid
+from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 
 from app import config, consensus, db
@@ -51,6 +52,28 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Outage Intelligence API", version=config.API_VERSION, lifespan=lifespan)
+
+# Sliding-window rate limiter, per client IP, matching meta.api.rate_limit.
+_hits: dict[str, deque] = defaultdict(deque)
+
+
+def _rate_limited(client: str) -> int | None:
+    """Return seconds until the window frees up, or None if allowed."""
+    if not config.RATE_LIMIT_ENFORCE:
+        return None
+    now = time.monotonic()
+    window = config.RATE_LIMIT["window_seconds"]
+    q = _hits[client]
+    while q and now - q[0] > window:
+        q.popleft()
+    if len(q) >= config.RATE_LIMIT["limit"]:
+        return int(window - (now - q[0])) + 1
+    q.append(now)
+    return None
+
+
+def reset_rate_limiter() -> None:
+    _hits.clear()
 
 
 def _latest_snapshot(region: str) -> dict | None:
@@ -160,6 +183,7 @@ def _build_response(row: dict, *, area: str | None, min_customers: int, limit: i
 
 @app.get(config.ENDPOINT_PATH)
 def get_outages(
+    request: Request,
     region: str = Query(..., description="Region code, e.g. TX"),
     area: str | None = Query(None, description="Optional county filter, e.g. Harris"),
     min_customers: int = Query(1, ge=0, description="Only areas with at least this many customers out"),
@@ -168,6 +192,16 @@ def get_outages(
     start = time.perf_counter()
     request_id = _request_id()
     region = region.strip().upper()
+
+    retry_after = _rate_limited(request.client.host if request.client else "unknown")
+    if retry_after is not None:
+        _log_request(int((time.perf_counter() - start) * 1000), 429)
+        resp = _error(429, "rate_limited",
+                      f"Rate limit of {config.RATE_LIMIT['limit']} requests per "
+                      f"{config.RATE_LIMIT['window_seconds']} s exceeded; retry in {retry_after} s.",
+                      request_id, retry_after_seconds=retry_after)
+        resp.headers["Retry-After"] = str(retry_after)
+        return resp
 
     if region not in config.REGIONS:
         latency_ms = int((time.perf_counter() - start) * 1000)
