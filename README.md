@@ -1,58 +1,70 @@
-# CVE Intelligence Pipeline
+# Texas Power Outage Consensus Pipeline
 
-A production-style data sourcing, consensus, and serving pipeline for CVE
-(vulnerability) intelligence. It ingests live CVE data from **two independent
-sources** (NVD and CIRCL), computes a cross-source **consensus** with dynamic
-confidence/quality scores, stores raw + consensus data in **PostgreSQL (JSONB)**
-under a **TTL lifecycle**, and serves a standardized REST payload for agent
-runtimes.
+A production-style data sourcing, consensus, and serving pipeline for **live
+power-outage status**. It ingests outage data from **seven independent online
+sources** (four electric utilities' own outage maps and three aggregator
+sites), computes a cross-source **consensus** with dynamic confidence/quality
+scores, stores raw + consensus data in **PostgreSQL (JSONB)** under a **TTL
+lifecycle**, and serves a standardized REST payload for agent runtimes.
 
-> Assignment task #23 from the catalog — `GET /v1/security/cve`.
+> Assignment task **#81** from the catalog — Energy & Utilities / Grid /
+> Outage status — `GET /v1/energy/outages` with `{"region": "TX"}`.
+
+## Sources
+
+| Source id | Publisher | Kind | Gives |
+|-----------|-----------|------|-------|
+| `ONCOR` | Oncor Electric Delivery (Kubra Storm Center JSON) | utility, first-hand | customers out by county + restoration ETA |
+| `CPS` | CPS Energy, San Antonio (Kubra) | utility, first-hand | same |
+| `AUSTIN_ENERGY` | Austin Energy (Kubra) | utility, first-hand | same |
+| `TNMP` | Texas-New Mexico Power (Kubra) | utility, first-hand | same |
+| `OUTAGE_PRO` | outage-pro.com (HTML) | aggregator | all 254 counties + top utilities |
+| `OUTAGE_ONLINE` | outage.online (HTML) | aggregator | all counties + 24 utilities |
+| `USOUTAGE` | usoutage.com (HTML) | aggregator | all counties + 68 utilities |
+
+All are public and keyless. The brief allows scraping; the three aggregator
+pages are parsed with plain regexes and every parse failure is a typed error.
 
 ## Does it run?
 
-Yes. It is a runnable pipeline: a migration creates the DB/schema, an ingestion
-worker populates it from live sources, a TTL worker manages lifecycle, and a
-FastAPI service serves consensus data read **only** from Postgres. A full pytest
-suite (unit + API + SLA) passes.
+Yes. A migration creates the DB/schema, an ingestion worker populates it from
+the live sources (one pass or continuously), a TTL worker manages lifecycle,
+and a FastAPI service serves consensus data read **only** from Postgres. A
+38-test pytest suite (unit + parser + API + SLA + lifecycle) passes.
 
 ## Layout
 
-| Path | Live? | What it is |
-|------|-------|------------|
-| `app/config.py` | ✅ | Watchlist, source registry/weights, shared consensus constants |
-| `app/db.py` | ✅ | Postgres connections + a small pool for the API |
-| `app/sources.py` | ✅ | NVD + CIRCL fetch/parse; typed errors, no silent fallback |
-| `app/consensus.py` | ✅ | **Pure** consensus function (unit-tested) |
-| `app/ingestion.py` | ✅ | Ingestion worker (fetch → store → consensus) |
-| `app/ttl.py` | ✅ | TTL worker: purge raw rows past TTL + write rollup summary |
-| `app/main.py` | ✅ | FastAPI serving layer (`GET /v1/security/cve`) |
-| `migrations/` | ✅ | `migrate.py` runner + `001_init.sql` schema |
-| `tests/` | ✅ | `test_consensus.py`, `test_api.py`, `test_sla.py` |
-| `docs/` | 📄 | `report.md` + the original assignment materials |
+| Path | What it is |
+|------|------------|
+| `app/config.py` | Source registry/weights, tolerances, TTLs, region list |
+| `app/sources.py` | Seven adapters (Kubra JSON ×4, HTML ×3); typed errors, no silent fallback |
+| `app/consensus.py` | **Pure** consensus: weighted clustering, outlier rejection, floors, ETAs |
+| `app/ingestion.py` | Ingestion worker (fetch → store raw → consensus → snapshot), `--loop` |
+| `app/ttl.py` | Lifecycle worker: hourly rollups, purge raw + old snapshots, mark stale |
+| `app/main.py` | FastAPI serving layer (`GET /v1/energy/outages`) |
+| `app/db.py` | Postgres connections + a small pool for the API |
+| `migrations/` | `migrate.py` runner + `001_init.sql` schema (5 tables, GIN indexes) |
+| `tests/` | `test_consensus.py`, `test_sources.py`, `test_api.py`, `test_sla.py` |
+| `docs/` | `report.pdf` (deliverable), `res.md` (run results), assignment materials |
+| `.github/workflows/` | CI (tests on a Postgres service) + hourly live-source health check |
 
 ## Prerequisites
 
-- **Python 3.11+** (developed on 3.13; use the `py` launcher on Windows).
-- **PostgreSQL 16** running locally on `localhost:5432` (any standard install;
-  the dev machine uses the portable binaries at `D:\PostgreSQL`, registered
-  as Windows service `postgresql-16-D`).
+- **Python 3.11+** (developed on 3.12; use the `py` launcher on Windows).
+- **PostgreSQL 16** on `localhost:5432` (any standard install; the dev machine
+  uses the portable binaries at `D:\PostgreSQL\16`, Windows service
+  `postgresql-16-D`).
 
 ## Setup
 
 ```powershell
-# 1. From the repo root, create a virtual environment and install deps.
-py -3.13 -m venv .venv
+py -3.12 -m venv .venv
 .venv\Scripts\python.exe -m pip install --upgrade pip
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 
-# 2. Configure DB credentials.
 copy .env.example .env
-#   then edit .env and set DB_PASSWORD (and DB_NAME if not 'cve_intel').
+#   then edit .env and set DB_PASSWORD
 ```
-
-> All commands below use `.venv\Scripts\python.exe`. On macOS/Linux use
-> `.venv/bin/python` and `python3 -m venv .venv`.
 
 ## Run (exact commands)
 
@@ -60,52 +72,70 @@ copy .env.example .env
 # 1. Create the database and apply the schema (idempotent).
 .venv\Scripts\python.exe -m migrations.migrate
 
-# 2. Run one ingestion pass over the watchlist (hits NVD + CIRCL live).
-#    Takes ~1 min: it paces requests to respect NVD's public rate limit.
+# 2. One ingestion pass over all seven live sources (~15 s).
 .venv\Scripts\python.exe -m app.ingestion
 
-#    Or run it continuously (one pass every INGEST_INTERVAL_SECONDS, default 900):
+#    Or continuously, one pass every INGEST_INTERVAL_SECONDS (default 300 = 5 min):
 .venv\Scripts\python.exe -m app.ingestion --loop
 
 # 3. Start the API.
 .venv\Scripts\python.exe -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 
 # 4. Query it (in another shell).
-curl "http://127.0.0.1:8000/v1/security/cve?cve=CVE-2021-44228"
+curl "http://127.0.0.1:8000/v1/energy/outages?region=TX"
+curl "http://127.0.0.1:8000/v1/energy/outages?region=TX&area=Harris"
+curl "http://127.0.0.1:8000/v1/energy/outages?region=TX&min_customers=100&limit=10"
 
-# 5. Run the TTL/lifecycle worker (purge expired raw rows + write rollups).
+# 5. Run the TTL/lifecycle worker (rollups, purge, stale marking).
 .venv\Scripts\python.exe -m app.ttl
 
 # 6. Run the full test suite.
 .venv\Scripts\python.exe -m pytest
 ```
 
+### Query parameters
+
+| Param | Default | Meaning |
+|-------|---------|---------|
+| `region` | required | Region code; `TX` is the tracked region, anything else → 404 |
+| `area` | — | Optional county filter (case-insensitive), e.g. `Harris` |
+| `min_customers` | `1` | Hide areas/utilities with fewer customers out (`0` lists all 254 counties) |
+| `limit` | `50` | Max rows in `outages` and `utilities` (≤ 500) |
+
 ## Design notes
 
-- **No silent fallbacks.** Any source timeout / 5xx / rate-limit / bad-schema is
-  written to `ingestion_errors` (and a failed `raw_ingests` row); the run
-  continues and never substitutes stale data as fresh.
-- **Consensus.** If both sources agree within a CVSS tolerance of `1.0`, the
-  score is a reliability-weighted average (NVD 0.6 / CIRCL 0.4) and the result is
-  `verified`. Beyond tolerance it is flagged as an outlier disagreement, the
-  conservative (higher) score is used, and confidence drops. A single source
-  still produces a row but is never presented as two-source verified.
-- **Freshness.** `age_seconds` is measured from `consensus_computed_at`; the API
-  sets `stale: true` and adds a warning when `age_seconds > ttl_seconds` (3600).
-- **API reads only Postgres.** It never calls NVD/CIRCL per request — that keeps
-  latency low (p95 < 200ms, asserted in `test_sla.py`).
-- **CIRCL note.** CIRCL migrated its API backend to the **cvelistv5** format,
-  where the CVSS score often lives in an **ADP** container (CISA/NVD-supplemented
-  data) rather than the CNA; `app/sources.py` scans both, and also still handles
-  the classic flat format. A minority of CVEs have no CVSS in CIRCL at all, and
-  CIRCL occasionally returns **HTTP 429** (rate limit) — in both cases the fetch
-  is recorded as a real ingestion error and the CVE degrades to a single-source
-  (unverified) consensus. That is the correct, spec-compliant behavior (no silent
-  fallback), and is exactly the failover path exercised by the tests.
+- **Two facts, one rule.** Consensus runs on *county* customers-out and on
+  *utility* customers-out. For each figure, every value defines a candidate
+  cluster (reports within `max(25, 20 %)`); the cluster with the most
+  reliability weight wins (utility feeds 0.55, aggregators 0.15 each), its
+  members are averaged by weight, the rest are outliers. Confidence starts at
+  0.90–0.97 by in-cluster spread and drops in proportion to outlier weight;
+  `verified` needs ≥ 2 agreeing sources, confidence ≥ 0.85 and a weight
+  majority. One source, or nobody agreeing → conservative (highest) figure at
+  confidence 0.5, never verified.
+- **Utilities arbitrate and floor.** A utility's own county figure votes as one
+  first-hand value; a *lower* first-hand figure is consistent (aggregators also
+  count utilities we don't fetch) and is not an outlier; a *higher* one raises
+  the served value — we never report fewer customers out than a utility admits.
+  Restoration `eta` = the latest estimate among that county's utility outages.
+- **No silent fallbacks.** Timeouts, 5xx, 403/429, 404 and unparseable pages
+  are typed `SourceError`s written to `ingestion_errors` (and a failed
+  `raw_ingests` row); the pass continues; failed sources are named in the
+  snapshot's `warnings`. If every source fails, no snapshot is written.
+- **Freshness.** Catalog says *minutes*: `TTL_SECONDS = 900`. `age_seconds`
+  is measured from `computed_at`; `stale: true` plus a warning beyond the TTL.
+- **Lifecycle.** Raw payloads purge after 6 h; snapshots older than 24 h are
+  summarised into `area_rollups` (per region/county/hour: samples, max, avg,
+  min confidence) before deletion; aged snapshots are flagged stale.
+- **API reads only Postgres**, via a connection pool — p95 < 200 ms asserted.
+- **Storage.** JSON sources are stored verbatim; HTML sources are stored as the
+  extracted micro-data plus a page fingerprint (bytes + sha256), not 500 kB of
+  markup per pass.
 
 ## Known limitations
 
-- The reported `rate_limit` in the payload is advertised metadata; the API does
-  not itself throttle callers (out of assignment scope).
-- The TTL worker is a one-shot process (`py -m app.ttl`); run it from a
-  scheduler/cron (or alongside `app.ingestion --loop`) for continuous purging.
+- The reported `rate_limit` is advertised metadata; the API does not throttle.
+- Aggregators poll utilities on their own schedules, so they routinely lag by
+  10–40 minutes — this is the disagreement the consensus rule exists to handle.
+- Only Texas is wired up; adding a region means adding its sources to
+  `config.SOURCES` / `KUBRA` / `AGGREGATOR_URLS` and `REGIONS`.

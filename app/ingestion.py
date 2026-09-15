@@ -1,12 +1,12 @@
 """Ingestion worker.
 
-For each CVE in the watchlist: fetch both sources, record every raw payload
-and every failure explicitly, compute consensus, and upsert the result.
+For each region: fetch every source, record every raw payload and every
+failure explicitly, compute the consensus snapshot, and store it.
 
 Runnable standalone:  py -m app.ingestion              (one pass)
                       py -m app.ingestion --loop       (continuous, every
                                                         INGEST_INTERVAL_SECONDS)
-Also importable:      run_once(cve_ids=[...])
+Also importable:      run_once(regions=[...])
 """
 from __future__ import annotations
 
@@ -19,135 +19,95 @@ import psycopg2.extras
 
 from app import config, consensus, db, sources
 
-# Map source_id -> (fetch fn, parse fn)
-_ADAPTERS = {
-    "NVD": (sources.fetch_nvd, sources.parse_nvd),
-    "CIRCL": (sources.fetch_circl, sources.parse_circl),
-}
-
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _ingest_source(conn, cve_id: str, source_id: str) -> dict:
-    """Fetch + parse one source, persisting raw payload / error. Returns a
-    normalized source-result dict for the consensus function."""
-    fetch, parse = _ADAPTERS[source_id]
-    retrieved_at = _now_iso()
-    publisher = config.SOURCES[source_id]["publisher"]
+def _ingest_source(conn, region: str, source_id: str) -> dict:
+    """Fetch + parse one source, persisting the raw payload or the error.
+    Returns the normalised source-result dict for the consensus function."""
+    fetch, parse = sources.ADAPTERS[source_id]
+    meta = config.SOURCES[source_id]
+    base = {"source_id": source_id, "publisher": meta["publisher"], "kind": meta["kind"],
+            "weight": meta["weight"], "retrieved_at": _now_iso()}
 
     try:
-        raw = fetch(cve_id)
+        raw = fetch()
         normalized = parse(raw)
     except sources.SourceError as exc:
-        # Record the raw failure and a structured ingestion error. No retry
-        # with stale data, no crash — the run continues.
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO raw_ingests (cve_id, source_id, payload, success, error_detail) "
-                "VALUES (%s, %s, %s, FALSE, %s)",
-                (
-                    cve_id,
-                    source_id,
-                    None,
-                    psycopg2.extras.Json({"type": exc.error_type, "message": exc.message}),
-                ),
+                "INSERT INTO raw_ingests (region, source_id, payload, success, error_detail) "
+                "VALUES (%s, %s, NULL, FALSE, %s)",
+                (region, source_id, psycopg2.extras.Json({"type": exc.error_type, "message": exc.message})),
             )
             cur.execute(
-                "INSERT INTO ingestion_errors (cve_id, source_id, error_type, error_message) "
+                "INSERT INTO ingestion_errors (region, source_id, error_type, error_message) "
                 "VALUES (%s, %s, %s, %s)",
-                (cve_id, source_id, exc.error_type, exc.message),
+                (region, source_id, exc.error_type, exc.message),
             )
         conn.commit()
-        print(f"  [{source_id}] FAILED ({exc.error_type}): {exc.message}")
-        return {
-            "source_id": source_id,
-            "publisher": publisher,
-            "success": False,
-            "retrieved_at": retrieved_at,
-            "cvss": None,
-        }
+        print(f"  [{source_id:13}] FAILED ({exc.error_type}): {exc.message}")
+        return {**base, "success": False, "utilities": {}, "areas": {}}
 
-    # Success: store the raw payload for the audit trail.
     with conn.cursor() as cur:
         cur.execute(
-            "INSERT INTO raw_ingests (cve_id, source_id, payload, success) "
-            "VALUES (%s, %s, %s, TRUE)",
-            (cve_id, source_id, psycopg2.extras.Json(raw)),
+            "INSERT INTO raw_ingests (region, source_id, payload, success) VALUES (%s, %s, %s, TRUE)",
+            (region, source_id, psycopg2.extras.Json(sources.storable_payload(source_id, raw, normalized))),
         )
     conn.commit()
-    print(f"  [{source_id}] ok  cvss={normalized['cvss']} "
-          f"products={len(normalized['affected_products'])}")
 
-    result = {
-        "source_id": source_id,
-        "publisher": publisher,
-        "success": True,
-        "retrieved_at": retrieved_at,
-    }
-    result.update(normalized)
-    return result
+    out = sum(u["out"] for u in normalized["utilities"].values())
+    print(f"  [{source_id:13}] ok  customers_out={out:<6} utilities={len(normalized['utilities']):<3} "
+          f"areas={len(normalized['areas']):<4} generated_at={normalized.get('generated_at')}")
+    return {**base, "success": True,
+            "generated_at": normalized.get("generated_at"),
+            "utilities": normalized["utilities"], "areas": normalized["areas"]}
 
 
-def _upsert_consensus(conn, record: dict) -> None:
+def _insert_snapshot(conn, snap: dict) -> None:
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO consensus
-                (cve_id, severity, cvss, affected_products, published_at,
-                 consensus_computed_at, confidence, quality_score, sources_used, stale)
-            VALUES (%s, %s, %s, %s, %s, now(), %s, %s, %s, FALSE)
-            ON CONFLICT (cve_id) DO UPDATE SET
-                severity              = EXCLUDED.severity,
-                cvss                  = EXCLUDED.cvss,
-                affected_products     = EXCLUDED.affected_products,
-                published_at          = EXCLUDED.published_at,
-                consensus_computed_at = EXCLUDED.consensus_computed_at,
-                confidence            = EXCLUDED.confidence,
-                quality_score         = EXCLUDED.quality_score,
-                sources_used          = EXCLUDED.sources_used,
-                stale                 = FALSE
+            INSERT INTO consensus_snapshots
+                (region, as_of, total_customers_affected, confidence, quality_score, verified,
+                 areas, utilities, sources_used, warnings)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
-            (
-                record["cve_id"],
-                record["severity"],
-                record["cvss"],
-                psycopg2.extras.Json(record["affected_products"]),
-                record["published"],
-                record["confidence"],
-                record["quality_score"],
-                psycopg2.extras.Json(record["sources_used"]),
-            ),
+            (snap["region"], snap["as_of"], snap["total_customers_affected"], snap["confidence"],
+             snap["quality_score"], snap["verified"],
+             psycopg2.extras.Json(snap["areas"]), psycopg2.extras.Json(snap["utilities"]),
+             psycopg2.extras.Json(snap["sources_used"]), psycopg2.extras.Json(snap["warnings"])),
         )
     conn.commit()
 
 
-def run_once(cve_ids: list[str] | None = None) -> dict:
-    """Run one ingestion pass over the watchlist. Returns a run summary."""
-    cve_ids = cve_ids or config.WATCHLIST
-    summary = {"processed": 0, "consensus_written": 0, "no_consensus": 0, "errors": 0}
+def run_once(regions: list[str] | None = None) -> dict:
+    """Run one ingestion pass. Returns a run summary."""
+    regions = regions or list(config.REGIONS)
+    summary = {"regions": 0, "snapshots_written": 0, "no_snapshot": 0, "sources_ok": 0, "errors": 0}
     conn = db.connect()
     try:
-        for i, cve_id in enumerate(cve_ids):
-            print(f"[{i + 1}/{len(cve_ids)}] {cve_id}")
-            results = [_ingest_source(conn, cve_id, sid) for sid in _ADAPTERS]
-            summary["processed"] += 1
+        for region in regions:
+            print(f"[{region}] {config.REGIONS.get(region, region)}")
+            results = [_ingest_source(conn, region, sid) for sid in sources.ADAPTERS]
+            summary["regions"] += 1
+            summary["sources_ok"] += sum(1 for r in results if r["success"])
             summary["errors"] += sum(1 for r in results if not r["success"])
 
-            record = consensus.compute_consensus(cve_id, results)
-            if record is None:
-                summary["no_consensus"] += 1
-                print(f"  -> no usable source; consensus NOT written")
-            else:
-                _upsert_consensus(conn, record)
-                summary["consensus_written"] += 1
-                print(f"  -> consensus: {record['severity']} cvss={record['cvss']} "
-                      f"conf={record['confidence']} verified={record['verified']}")
-
-            # Be polite to NVD's public rate limit between CVEs.
-            if i < len(cve_ids) - 1 and config.NVD_REQUEST_DELAY_SECONDS > 0:
-                time.sleep(config.NVD_REQUEST_DELAY_SECONDS)
+            snap = consensus.compute_consensus(region, results)
+            if snap is None:
+                summary["no_snapshot"] += 1
+                print("  -> no usable source; snapshot NOT written")
+                continue
+            _insert_snapshot(conn, snap)
+            summary["snapshots_written"] += 1
+            top = ", ".join(f"{a['area']}={a['customers_affected']}" for a in snap["areas"][:5])
+            print(f"  -> snapshot: total={snap['total_customers_affected']} conf={snap['confidence']} "
+                  f"quality={snap['quality_score']} verified={snap['verified']} | top: {top}")
+            for w in snap["warnings"]:
+                print(f"     ! {w}")
     finally:
         conn.close()
 
@@ -157,9 +117,9 @@ def run_once(cve_ids: list[str] | None = None) -> dict:
 
 
 def run_forever(interval_seconds: float) -> None:
-    """Continuously re-ingest the watchlist, sleeping `interval_seconds`
-    between passes. A pass that raises (e.g. DB down) is reported and the loop
-    keeps going — nothing is ever swallowed silently."""
+    """Continuously re-ingest, sleeping `interval_seconds` between passes.
+    A pass that raises (e.g. DB down) is reported and the loop keeps going —
+    nothing is ever swallowed silently."""
     while True:
         started = time.monotonic()
         try:
@@ -172,11 +132,9 @@ def run_forever(interval_seconds: float) -> None:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CVE ingestion worker")
-    parser.add_argument("--loop", action="store_true",
-                        help="run continuously instead of a single pass")
-    parser.add_argument("--interval", type=float,
-                        default=config.INGEST_INTERVAL_SECONDS,
+    parser = argparse.ArgumentParser(description="Outage ingestion worker")
+    parser.add_argument("--loop", action="store_true", help="run continuously instead of a single pass")
+    parser.add_argument("--interval", type=float, default=config.INGEST_INTERVAL_SECONDS,
                         help="seconds between passes in --loop mode")
     args = parser.parse_args()
     if args.loop:

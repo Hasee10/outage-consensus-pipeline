@@ -1,10 +1,11 @@
 """FastAPI serving layer.
 
-GET /v1/security/cve?cve=<CVE-ID>
+GET /v1/energy/outages?region=TX[&area=Harris][&min_customers=1][&limit=50]
 
-Reads ONLY from Postgres (never calls NVD/CIRCL live). Emits the exact
-standardized response envelope from the assignment spec, logs every request to
-request_log, and returns a clean 404 for CVEs not present in the DB.
+Reads ONLY from Postgres (never calls a provider live). Emits the exact
+standardized response envelope from the assignment spec, logs every request
+to request_log, and returns a clean 404 for regions that are not tracked or
+have no snapshot yet.
 """
 from __future__ import annotations
 
@@ -20,7 +21,6 @@ from app import config, consensus, db
 
 
 def _iso_z(dt: datetime | None) -> str | None:
-    """Render a datetime as ISO8601 UTC with a trailing Z."""
     if dt is None:
         return None
     if dt.tzinfo is None:
@@ -32,14 +32,13 @@ def _request_id() -> str:
     return "req_" + uuid.uuid4().hex[:24]
 
 
-def _log_request(endpoint: str, latency_ms: int, status_code: int) -> None:
+def _log_request(latency_ms: int, status_code: int) -> None:
     """Best-effort audit log; never let logging failure break the response."""
     try:
         with db.pooled_cursor(dict_rows=False) as cur:
             cur.execute(
-                "INSERT INTO request_log (endpoint, latency_ms, status_code) "
-                "VALUES (%s, %s, %s)",
-                (endpoint, latency_ms, status_code),
+                "INSERT INTO request_log (endpoint, latency_ms, status_code) VALUES (%s, %s, %s)",
+                (config.ENDPOINT_PATH, latency_ms, status_code),
             )
     except Exception as exc:  # pragma: no cover - defensive
         print(f"request_log insert failed: {exc}")
@@ -51,52 +50,84 @@ async def lifespan(app: FastAPI):
     db.close_pool()
 
 
-app = FastAPI(title="CVE Intelligence API", version=config.API_VERSION, lifespan=lifespan)
+app = FastAPI(title="Outage Intelligence API", version=config.API_VERSION, lifespan=lifespan)
 
 
-def _fetch_consensus(cve_id: str) -> dict | None:
+def _latest_snapshot(region: str) -> dict | None:
     with db.pooled_cursor() as cur:
-        cur.execute("SELECT * FROM consensus WHERE cve_id = %s", (cve_id,))
+        cur.execute(
+            "SELECT * FROM consensus_snapshots WHERE region = %s ORDER BY computed_at DESC LIMIT 1",
+            (region,),
+        )
         return cur.fetchone()
 
 
-def _build_response(row: dict, latency_ms: int, request_id: str) -> dict:
+def _error(status: int, code: str, message: str, request_id: str, **extra) -> JSONResponse:
+    return JSONResponse(
+        status_code=status,
+        content={
+            "error": {"code": code, "message": message, **extra},
+            "meta": {
+                "request_id": request_id,
+                "product_id": config.PRODUCT_ID,
+                "version": config.API_VERSION,
+                "served_at": _iso_z(datetime.now(timezone.utc)),
+            },
+        },
+    )
+
+
+def _build_response(row: dict, *, area: str | None, min_customers: int, limit: int,
+                    latency_ms: int, request_id: str) -> dict:
     now = datetime.now(timezone.utc)
-    computed_at = row["consensus_computed_at"]
+    computed_at = row["computed_at"]
     if computed_at.tzinfo is None:
         computed_at = computed_at.replace(tzinfo=timezone.utc)
-
     age_seconds = max(0, int((now - computed_at).total_seconds()))
     stale = age_seconds > config.TTL_SECONDS
 
-    sources_used = row.get("sources_used") or []
-    n_sources = len(sources_used)
-    confidence = row.get("confidence")
-    verified = n_sources >= 2 and (confidence or 0) >= config.VERIFIED_MIN_CONFIDENCE
+    areas = row["areas"] or []
+    if area:
+        areas = [a for a in areas if a["area"].lower() == area.lower()]
+    areas = [a for a in areas if a["customers_affected"] >= min_customers][:limit]
 
-    warnings = consensus.build_warnings(
-        n_sources=n_sources,
-        confidence=confidence or 0.0,
-        stale=stale,
-        contributors=sources_used,
-    )
-
-    provenance = [
+    outages = [
         {
-            "source_id": s.get("source_id"),
-            "publisher": s.get("publisher"),
-            "retrieved_at": s.get("retrieved_at"),
+            "area": a["area"],
+            "customers_affected": a["customers_affected"],
+            "customers_tracked": a.get("customers_tracked"),
+            "eta": a.get("eta"),
+            "utilities_reporting": a.get("utilities_reporting", []),
+            "sources": sorted(a.get("reports", {}).keys()),
+            "confidence": a["confidence"],
+            "verified": a["verified"],
         }
-        for s in sources_used
+        for a in areas
     ]
+    utilities = [
+        {
+            "utility": u["utility"],
+            "customers_affected": u["customers_affected"],
+            "customers_tracked": u.get("customers_tracked"),
+            "sources": sorted(u.get("reports", {}).keys()),
+            "confidence": u["confidence"],
+            "verified": u["verified"],
+        }
+        for u in (row["utilities"] or [])
+        if u["customers_affected"] >= min_customers
+    ][:limit]
+
+    warnings = list(row["warnings"] or [])
+    if stale:
+        warnings.append(consensus.stale_warning())
 
     return {
         "data": {
-            "cve": row["cve_id"],
-            "severity": row["severity"],
-            "cvss": row["cvss"],
-            "affected_products": row.get("affected_products") or [],
-            "published": _iso_z(row.get("published_at")),
+            "region": row["region"],
+            "outages": outages,
+            "utilities": utilities,
+            "total_customers_affected": row["total_customers_affected"],
+            "as_of": _iso_z(row["as_of"]),
             "source": "consensus",
         },
         "meta": {
@@ -110,50 +141,50 @@ def _build_response(row: dict, latency_ms: int, request_id: str) -> dict:
                 "ttl_seconds": config.TTL_SECONDS,
                 "stale": stale,
             },
-            "provenance": provenance,
+            "provenance": [
+                {"source_id": s.get("source_id"), "publisher": s.get("publisher"),
+                 "retrieved_at": s.get("retrieved_at")}
+                for s in (row["sources_used"] or [])
+            ],
             "trust": {
-                "confidence": confidence,
-                "quality_score": row.get("quality_score"),
-                "verified": verified,
+                "confidence": row["confidence"],
+                "quality_score": row["quality_score"],
+                "verified": bool(row["verified"]),
             },
             "license": {"type": "public", "usage": "agent_runtime"},
-            "api": {
-                "latency_ms": latency_ms,
-                "rate_limit": config.RATE_LIMIT,
-            },
+            "api": {"latency_ms": latency_ms, "rate_limit": config.RATE_LIMIT},
             "warnings": warnings,
         },
     }
 
 
 @app.get(config.ENDPOINT_PATH)
-def get_cve(cve: str = Query(..., description="CVE identifier, e.g. CVE-2021-44228")):
+def get_outages(
+    region: str = Query(..., description="Region code, e.g. TX"),
+    area: str | None = Query(None, description="Optional county filter, e.g. Harris"),
+    min_customers: int = Query(1, ge=0, description="Only areas with at least this many customers out"),
+    limit: int = Query(50, ge=1, le=500),
+):
     start = time.perf_counter()
     request_id = _request_id()
-    cve_id = cve.strip().upper()
+    region = region.strip().upper()
 
-    row = _fetch_consensus(cve_id)
+    if region not in config.REGIONS:
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        _log_request(latency_ms, 404)
+        return _error(404, "region_not_tracked",
+                      f"Region {region!r} is not tracked; supported: {', '.join(config.REGIONS)}.",
+                      request_id, region=region)
+
+    row = _latest_snapshot(region)
     latency_ms = int((time.perf_counter() - start) * 1000)
-
     if row is None:
-        _log_request(config.ENDPOINT_PATH, latency_ms, 404)
-        return JSONResponse(
-            status_code=404,
-            content={
-                "error": {
-                    "code": "cve_not_found",
-                    "message": f"{cve_id} is not tracked in the consensus store.",
-                    "cve": cve_id,
-                },
-                "meta": {
-                    "request_id": request_id,
-                    "product_id": config.PRODUCT_ID,
-                    "version": config.API_VERSION,
-                    "served_at": _iso_z(datetime.now(timezone.utc)),
-                },
-            },
-        )
+        _log_request(latency_ms, 404)
+        return _error(404, "no_snapshot",
+                      f"No consensus snapshot exists yet for {region}; run the ingestion worker.",
+                      request_id, region=region)
 
-    body = _build_response(row, latency_ms, request_id)
-    _log_request(config.ENDPOINT_PATH, latency_ms, 200)
+    body = _build_response(row, area=area, min_customers=min_customers, limit=limit,
+                           latency_ms=latency_ms, request_id=request_id)
+    _log_request(latency_ms, 200)
     return body

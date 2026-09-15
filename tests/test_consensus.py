@@ -1,101 +1,130 @@
-"""Unit tests for the pure consensus function (no DB required).
-
-Covers the four required cases: both sources agree, sources disagree beyond
-threshold, only one source available, and both sources fail.
-"""
+"""Unit tests for the pure consensus function — no DB, no network."""
 from __future__ import annotations
 
 from app import config
-from app.consensus import compute_consensus, severity_from_score
+from app.consensus import DIRECT, agree, compute_consensus
 
 
-def make_source(source_id, cvss, *, success=True, severity=None,
-                products=None, published="2021-12-10T00:00:00Z",
-                description="a vulnerability"):
-    return {
-        "source_id": source_id,
-        "publisher": config.SOURCES.get(source_id, {}).get("publisher", source_id),
-        "success": success,
-        "retrieved_at": "2026-09-14T10:00:00Z",
-        "cvss": cvss,
-        "severity": severity,
-        "affected_products": products if products is not None else ["apache:log4j"],
-        "published": published,
-        "description": description,
-    }
+def src(source_id, *, success=True, utilities=None, areas=None, generated_at="2026-09-15T04:00:00Z"):
+    meta = config.SOURCES[source_id]
+    return {"source_id": source_id, "publisher": meta["publisher"], "kind": meta["kind"],
+            "weight": meta["weight"], "success": success, "retrieved_at": "2026-09-15T04:01:00Z",
+            "generated_at": generated_at, "utilities": utilities or {}, "areas": areas or {}}
 
 
-# --- Case 1: both sources agree within tolerance ----------------------------
-def test_both_sources_agree():
-    sources = [make_source("NVD", 9.8), make_source("CIRCL", 9.9)]
-    r = compute_consensus("CVE-2021-44228", sources)
-
-    assert r is not None
-    assert r["disagreement"] is False
-    assert r["verified"] is True
-    assert r["confidence"] >= config.VERIFIED_MIN_CONFIDENCE
-    # weighted average of 9.8 (w0.6) and 9.9 (w0.4) rounds to 9.8
-    assert r["cvss"] == 9.8
-    assert r["severity"] == "critical"
-    assert {s["source_id"] for s in r["sources_used"]} == {"NVD", "CIRCL"}
-    # no single-source or disagreement warning
-    assert r["warnings"] == []
+def area(out, tracked=100000, etr=None):
+    return {"out": out, "tracked": tracked, "etr": etr, "n_out": None}
 
 
-# --- Case 2: sources disagree beyond threshold ------------------------------
-def test_sources_disagree_beyond_threshold():
-    sources = [make_source("NVD", 9.8), make_source("CIRCL", 4.0)]
-    r = compute_consensus("CVE-2021-44228", sources)
+# --- agree(): the core rule ---------------------------------------------------
+def test_agree_all_sources_match():
+    r = agree({"OUTAGE_PRO": 500, "OUTAGE_ONLINE": 505, "USOUTAGE": 498})
+    assert r["value"] == 501 and r["verified"] is True
+    assert r["confidence"] >= 0.96 and r["rejected"] == []
 
+
+def test_agree_rejects_outlier_by_majority():
+    r = agree({"OUTAGE_PRO": 300, "OUTAGE_ONLINE": 2480, "USOUTAGE": 2670},
+              {"OUTAGE_PRO": .15, "OUTAGE_ONLINE": .15, "USOUTAGE": .15})
+    assert r["rejected"] == ["OUTAGE_PRO"]
+    assert 2480 <= r["value"] <= 2670
+    assert r["verified"] is True and r["confidence"] < 0.97   # penalised, still verified
+
+
+def test_agree_first_hand_weight_breaks_a_tie():
+    # 2 vs 2 split; the utility's own feed sides with the first pair.
+    r = agree({DIRECT: 610, "OUTAGE_PRO": 611, "OUTAGE_ONLINE": 121, "USOUTAGE": 121},
+              {DIRECT: .55, "OUTAGE_PRO": .15, "OUTAGE_ONLINE": .15, "USOUTAGE": .15})
+    assert r["value"] in (610, 611) and r["verified"] is True
+    assert set(r["rejected"]) == {"OUTAGE_ONLINE", "USOUTAGE"}
+
+
+def test_agree_single_source_is_never_verified():
+    r = agree({"USOUTAGE": 42})
+    assert r == {"value": 42, "confidence": config.LOW_CONFIDENCE, "verified": False,
+                 "agreeing": ["USOUTAGE"], "rejected": [], "disagreement": False, "n_sources": 1}
+
+
+def test_agree_total_disagreement_is_conservative():
+    r = agree({"OUTAGE_PRO": 10, "OUTAGE_ONLINE": 500, "USOUTAGE": 5000})
+    assert r["value"] == 5000                         # highest claim
+    assert r["confidence"] == config.LOW_CONFIDENCE and r["verified"] is False
     assert r["disagreement"] is True
-    assert r["verified"] is False
-    assert r["confidence"] == config.LOW_CONFIDENCE
-    # conservative: take the higher score
-    assert r["cvss"] == 9.8
-    assert any("disagreed" in w for w in r["warnings"])
 
 
-# --- Case 3: only one source available --------------------------------------
-def test_only_one_source_available():
-    sources = [
-        make_source("NVD", 7.5),
-        make_source("CIRCL", None, success=False),
-    ]
-    r = compute_consensus("CVE-2019-0708", sources)
-
-    assert r is not None
-    assert len(r["sources_used"]) == 1
-    assert r["sources_used"][0]["source_id"] == "NVD"
-    assert r["verified"] is False
-    assert r["confidence"] <= config.LOW_CONFIDENCE
-    assert any("Only one source" in w for w in r["warnings"])
+def test_agree_returns_none_for_nothing():
+    assert agree({}) is None
 
 
-# --- Case 4: both sources fail ----------------------------------------------
-def test_both_sources_fail():
-    sources = [
-        make_source("NVD", None, success=False),
-        make_source("CIRCL", None, success=False),
-    ]
-    r = compute_consensus("CVE-2021-44228", sources)
-    assert r is None  # no consensus row is written by the caller
+# --- compute_consensus(): the snapshot ----------------------------------------
+def test_snapshot_shape_and_ordering():
+    snap = compute_consensus("TX", [
+        src("OUTAGE_PRO", areas={"Harris": area(300), "Dallas": area(50)},
+            utilities={"Oncor": {"out": 800, "tracked": 4000000}}),
+        src("OUTAGE_ONLINE", areas={"Harris": area(310), "Dallas": area(48)},
+            utilities={"Oncor": {"out": 790, "tracked": 4000000}}),
+        src("ONCOR", areas={"Dallas": area(45, etr="2026-09-15T09:00:00Z")},
+            utilities={"Oncor": {"out": 798, "tracked": 4176928}}),
+    ])
+    assert snap["region"] == "TX"
+    assert [a["area"] for a in snap["areas"]] == ["Harris", "Dallas"]
+    assert snap["total_customers_affected"] == sum(a["customers_affected"] for a in snap["areas"])
+    dallas = snap["areas"][1]
+    assert dallas["eta"] == "2026-09-15T09:00:00Z"          # from the utility's map
+    assert dallas["utilities_reporting"] == ["Oncor"]
+    assert snap["verified"] is True and snap["confidence"] >= 0.85
+    assert snap["utilities"][0]["utility"] == "Oncor" and snap["utilities"][0]["verified"] is True
+    assert {s["source_id"] for s in snap["sources_used"]} == {"OUTAGE_PRO", "OUTAGE_ONLINE", "ONCOR"}
 
 
-# --- Supporting behaviour ---------------------------------------------------
-def test_severity_bands():
-    assert severity_from_score(0.0) == "none"
-    assert severity_from_score(3.9) == "low"
-    assert severity_from_score(5.0) == "medium"
-    assert severity_from_score(8.0) == "high"
-    assert severity_from_score(9.5) == "critical"
+def test_utility_floor_raises_underreporting_aggregators():
+    snap = compute_consensus("TX", [
+        src("OUTAGE_PRO", areas={"Bexar": area(0)}),
+        src("OUTAGE_ONLINE", areas={"Bexar": area(0)}),
+        src("CPS", areas={"Bexar": area(900)}, utilities={"CPS Energy": {"out": 900, "tracked": 987088}}),
+    ])
+    bexar = snap["areas"][0]
+    assert bexar["customers_affected"] == 900
+    assert bexar["note"] == "raised to utility-reported floor"
+    assert any("floor" in w for w in snap["warnings"])
 
 
-def test_quality_score_reflects_completeness():
-    complete = make_source("NVD", 9.8, severity="critical")
-    sparse = make_source(
-        "CIRCL", 9.8, severity=None, products=[], published=None, description=None
-    )
-    full = compute_consensus("CVE-A", [complete])
-    partial = compute_consensus("CVE-B", [sparse])
-    assert full["quality_score"] > partial["quality_score"]
-    assert full["quality_score"] == 1.0
+def test_lower_first_hand_figure_is_not_an_outlier():
+    # Oncor serves only part of Denton; aggregators count every utility there.
+    snap = compute_consensus("TX", [
+        src("OUTAGE_PRO", areas={"Denton": area(154)}),
+        src("OUTAGE_ONLINE", areas={"Denton": area(155)}),
+        src("USOUTAGE", areas={"Denton": area(150)}),
+        src("ONCOR", areas={"Denton": area(28)}, utilities={"Oncor": {"out": 28, "tracked": 1}}),
+    ])
+    d = snap["areas"][0]
+    assert d["customers_affected"] in range(150, 156)
+    assert d["rejected"] == [] and d["verified"] is True
+
+
+def test_failed_sources_are_reported_not_hidden():
+    snap = compute_consensus("TX", [
+        src("OUTAGE_PRO", areas={"Harris": area(300)}),
+        src("OUTAGE_ONLINE", success=False),
+        src("USOUTAGE", success=False),
+    ])
+    assert snap["verified"] is False                          # < 2 aggregators
+    assert any("2 source(s) failed" in w for w in snap["warnings"])
+    assert any("Fewer than two aggregators" in w for w in snap["warnings"])
+    assert snap["areas"][0]["confidence"] == config.LOW_CONFIDENCE
+
+
+def test_all_sources_fail_yields_no_snapshot():
+    assert compute_consensus("TX", [src("OUTAGE_PRO", success=False), src("ONCOR", success=False)]) is None
+
+
+def test_quality_reflects_completeness():
+    full = compute_consensus("TX", [
+        src("OUTAGE_PRO", areas={"Harris": area(300)}, utilities={"Oncor": {"out": 1, "tracked": 5}}),
+        src("OUTAGE_ONLINE", areas={"Harris": area(300)}, utilities={"Oncor": {"out": 1, "tracked": 5}}),
+    ])
+    thin = compute_consensus("TX", [
+        src("OUTAGE_PRO", areas={"Harris": area(300, tracked=None)}, generated_at=None),
+        src("OUTAGE_ONLINE", areas={"Harris": area(300, tracked=None)}, generated_at=None),
+    ])
+    assert full["quality_score"] > thin["quality_score"]

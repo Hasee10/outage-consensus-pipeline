@@ -15,3 +15,4 @@ venv/
 # One-off local admin helper (not part of the deliverable)
 reset_pg_password.ps1
 reset_pg_log.txt
+source_health.json

@@ -1,0 +1,30 @@
+name: Live source health
+
+# The three aggregator pages are scraped HTML and the four utility feeds are
+# third-party JSON; any of them can change shape without notice. This job
+# fetches every source for real, once an hour, and fails loudly if an adapter
+# breaks — so a silent parser regression cannot sit unnoticed until demo day.
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Fetch and parse all seven sources
+        run: python scripts/source_health.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-health-${{ github.run_id }}
+          path: source_health.json
+          retention-days: 14

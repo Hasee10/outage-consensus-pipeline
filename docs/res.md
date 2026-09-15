@@ -1,7 +1,7 @@
-# Run Results — 14 September 2026
+# Run Results — 15 September 2026
 
-End-to-end verification of the CVE intelligence pipeline on the submission
-machine (Windows 10, Python 3.13, PostgreSQL 16.10 native on `D:`).
+End-to-end verification of the Texas outage consensus pipeline on the
+submission machine (Windows 10, Python 3.12, PostgreSQL 16.10 native on `D:`).
 Commands are the ones listed in `README.md`, run in order.
 
 ## 1. Migration
@@ -12,100 +12,107 @@ py -m migrations.migrate
 
 | Step | Result |
 |------|--------|
-| Create database `cve_intel` | created |
-| Apply `001_init.sql` (4 tables, 7 indexes incl. 2 GIN) | applied |
+| Create database `outage_intel` | created |
+| Apply `001_init.sql` (5 tables, 8 indexes incl. 3 GIN) | applied |
 
 ## 2. Live ingestion (`py -m app.ingestion`)
 
-11 watchlist CVEs, both providers queried live.
+All seven sources fetched live; one pass takes ~15 s.
 
-| CVE | Name | Severity | CVSS | Confidence | Quality | Sources | Verified |
-|-----|------|----------|------|-----------:|--------:|--------:|:--------:|
-| CVE-2021-44228 | Log4Shell | critical | 10.0 | 0.97 | 1.0 | 2 | yes |
-| CVE-2021-45046 | Log4j follow-up | critical | 9.0 | 0.97 | 1.0 | 2 | yes |
-| CVE-2014-6271 | Shellshock | critical | 9.8 | 0.97 | 0.9 | 2 | yes |
-| CVE-2019-0708 | BlueKeep | critical | 9.8 | 0.97 | 1.0 | 2 | yes |
-| CVE-2022-22965 | Spring4Shell | critical | 9.8 | 0.97 | 1.0 | 2 | yes |
-| CVE-2017-0144 | EternalBlue | high | 8.8 | 0.97 | 1.0 | 2 | yes |
-| CVE-2021-34527 | PrintNightmare | high | 8.8 | 0.97 | 1.0 | 2 | yes |
-| CVE-2023-4863 | libwebp | high | 8.8 | 0.97 | 1.0 | 2 | yes |
-| CVE-2014-0160 | Heartbleed | high | 7.5 | 0.97 | 0.9 | 2 | yes |
-| CVE-2023-44487 | HTTP/2 Rapid Reset | high | 7.5 | 0.97 | 1.0 | 2 | yes |
-| CVE-2020-1472 | Zerologon | medium | 5.5 | 0.97 | 1.0 | 2 | yes |
+| Source | Kind | Result | Customers out (own view) | Areas | Source timestamp |
+|--------|------|--------|-------------------------:|------:|------------------|
+| ONCOR | utility | ok | 548 | 7 counties | 07:10:00Z |
+| CPS | utility | ok | 1 | 1 | 07:13:35Z |
+| AUSTIN_ENERGY | utility | ok | 0 | 0 (no outages → no county layer) | 07:16:34Z |
+| TNMP | utility | ok | 28 | 2 | 07:12:31Z |
+| OUTAGE_PRO | aggregator | ok | 4,129 | 254 counties | 07:11:00Z |
+| OUTAGE_ONLINE | aggregator | ok | 11,606 | 262 | (page carries no stamp) |
+| USOUTAGE | aggregator | ok | 12,478 | 261 | 06:27:05Z |
 
-Summary: `processed 11 · consensus_written 11 · no_consensus 0 · errors 0`.
-Quality 0.9 on two rows: CIRCL carries no product list for those older CVEs.
+Snapshot: **total 11,539 customers affected · confidence 0.88 · quality 0.97 ·
+verified true**. Warnings: 33 areas had an outlier rejected or unresolved
+disagreement; 2 areas raised to the utility-reported floor.
+Summary: `regions 1 · snapshots_written 1 · sources_ok 7 · errors 0`.
 
-### Earlier runs the same day (kept for the record)
+### Consensus in action (real rows from this pass)
 
-| Run | NVD | CIRCL | Outcome |
-|-----|-----|-------|---------|
-| 1 | HTTP 503 on all 11 | 6 ok, 5 × HTTP 429 | 6 single-source rows (conf 0.5, unverified), 5 no consensus, 16 errors logged |
-| 2 | 11 ok | 8 ok, 3 × HTTP 429 | 8 verified, 3 single-source, 3 errors logged |
-| 3 (final) | 11 ok | 11 ok | 11 verified, 0 errors |
+| County | Reports (source → customers out) | Result | Conf. | Verified | Why |
+|--------|----------------------------------|-------:|------:|:--------:|-----|
+| Harris | outage-pro 217 · outage.online 2,482 · usoutage 2,669 | 2,576 | 0.92 | yes | majority cluster; outage-pro rejected as outlier |
+| Williamson | **Oncor 400** · outage-pro 400 · outage.online 121 · usoutage 121 | 400 | 0.93 | yes | 2-vs-2 split resolved by the first-hand utility vote |
+| Denton | Oncor 28 · usoutage 155 · outage.online 154 | 154 | 0.97 | yes | lower first-hand figure is a partial count, not an outlier |
+| Montgomery | three aggregators, none within tolerance | 630 | 0.50 | no | total disagreement → conservative (highest) claim |
+| Bexar (earlier pass) | CPS 1 · outage-pro 0 · outage.online 394 · usoutage 405 | 400 | 0.97 | yes | agreeing pair wins; utility ETA 06:15Z attached |
 
-Every provider failure was written to `ingestion_errors` and surfaced as a
-lower-confidence row with an explicit warning — no silent fallback.
+Utility level: Oncor reported 798 by its own map and by outage-pro, 1,593 by
+outage.online and 2,017 by usoutage (both lagging) → consensus **798,
+confidence 0.93, verified**, laggards listed as rejected.
+
+### Earlier runs the same day
+
+| Run | Change | Outcome |
+|-----|--------|---------|
+| 1 | 2 aggregators with county data (usoutage counties not yet parsed) | conf 0.51, unverified — no tiebreaker when the two disagreed |
+| 2 | utility first-hand vote + floor added | conf 0.54 — 2-vs-2 splits still unresolved by the median rule |
+| 3 | usoutage county list parsed (3rd vote) | conf 0.85, verified |
+| 4 | median rule → weighted clustering | conf 0.90, verified; Williamson resolved correctly |
+| 5 (final) | outage-pro parser fixed for `<0.01%` rows (254/254 counties) | conf 0.88, verified, 0 errors |
+
+No source failed during any pass today, so `ingestion_errors` is empty; the
+failover paths are exercised by the test suite instead.
 
 ## 3. API (`py -m uvicorn app.main:app`)
 
 | Request | Status | Notes |
 |---------|--------|-------|
-| `GET /v1/security/cve?cve=CVE-2021-44228` | 200 | cvss 10.0 · age 114 s · stale false · verified true · latency 73 ms · warnings [] |
-| `GET /v1/security/cve?cve=CVE-1999-0001` | 404 | `{"error":{"code":"cve_not_found",…},"meta":{…}}` |
+| `GET /v1/energy/outages?region=TX&limit=8` | 200 | total 11,539 · age 5 s · stale false · verified true · latency 66 ms · 7 provenance entries |
+| `GET /v1/energy/outages?region=TX&area=Williamson` | 200 | one row: 400 customers, sources ONCOR + 3 aggregators, conf 0.93 |
+| `GET /v1/energy/outages?region=CA` | 404 | `{"error":{"code":"region_not_tracked",…},"meta":{…}}` |
 
-Response envelope matched the assignment's Section 3 schema exactly
-(`data` + `meta.request_id/product_id/version/served_at/source_last_updated_at/freshness/provenance/trust/license/api/warnings`).
+Envelope matched the assignment's Section 3 schema exactly (`data` + `meta`:
+request_id, product_id `energy.outages.v1`, version, served_at,
+source_last_updated_at, freshness, provenance, trust, license, api, warnings).
 
 ## 4. TTL / lifecycle worker (`py -m app.ttl`)
 
-| Run | TTL | Rollups written | Rows purged | Consensus marked stale |
-|-----|----:|----------------:|------------:|-----------------------:|
-| Demonstration | 1 s | 22 | 22 | 11 |
-| Final (normal) | 3600 s | 0 | 0 | 0 |
+| Run | Raw TTL | Snapshot TTL | Rollup rows | Snapshots purged | Raw purged | Marked stale |
+|-----|--------:|-------------:|------------:|-----------------:|-----------:|-------------:|
+| Normal (6 h / 24 h / 15 min) | 21600 s | 86400 s | 0 | 0 | 0 | 0 |
+| Demonstration | 60 s | 60 s | 133 | 1 | 0 | 0 |
 
-The 1-second run proves the mechanism: each purged (CVE, source) group left one
-`*:SUMMARY` rollup row. The final run purged nothing because all raw rows were
-younger than the TTL, and the fresh ingestion had reset `stale` to false.
+The demonstration run summarised one 2-minute-old snapshot into 133 hourly
+per-county rollup rows and deleted it; `area_rollups` now holds 276 rows over
+143 counties (peak 2,576 in Harris, 4 samples in the 09:00 hour). The normal
+run purged nothing because everything was younger than its TTL.
 
 ## 5. Test suite (`py -m pytest -v`)
 
-**16 passed, 0 failed, 0 skipped — 2.80 s**
+**39 passed, 0 failed, 0 skipped — 3.6 s**
 
 | File | Tests | Covers |
 |------|------:|--------|
-| `tests/test_consensus.py` | 6 | agreement, disagreement, single source, total failure, severity bands, quality |
-| `tests/test_api.py` | 6 | exact schema shape, verified, 404, stale, fresh, single-source |
-| `tests/test_sla.py` | 4 | p95 < 200 ms (60 req), failover ×2, 200-request availability |
+| `tests/test_consensus.py` | 12 | clustering rule, outlier rejection, first-hand tiebreak, single source, total disagreement, floor, partial first-hand counts, failed-source warnings, no-snapshot, quality |
+| `tests/test_sources.py` | 12 | all four parser families on captured fixtures; bad-schema errors; county-name unification; storage shape |
+| `tests/test_api.py` | 8 | exact envelope, filters, case-insensitive area, both 404 shapes, stale/fresh, unverified served honestly |
+| `tests/test_sla.py` | 7 | p95 < 200 ms (60 req), 200-request availability, failover ×3, TTL rollup+purge, stale marking |
 
 ## 6. Database state after the run
 
-### `raw_ingests` (audit trail)
+| Table | Contents |
+|-------|----------|
+| `raw_ingests` | 7 rows (one per source, latest pass): Oncor JSON 58 kB, CPS 9 kB, TNMP 3 kB, Austin 1.6 kB; aggregators stored as extracted data + page fingerprint (4–6 kB each) |
+| `consensus_snapshots` | 1 (newest), `stale = false` |
+| `area_rollups` | 276 rows, 143 counties |
+| `ingestion_errors` | 0 |
+| `request_log` | 2,149 × HTTP 200 (avg 2 ms), 19 × HTTP 404 (avg 23 ms) |
 
-| source_id | success | rows | payload size |
-|-----------|---------|-----:|-------------:|
-| NVD | true | 11 | 178 kB |
-| CIRCL | true | 11 | 90 kB |
-| NVD:SUMMARY | true | 11 | 2.4 kB |
-| CIRCL:SUMMARY | true | 11 | 2.4 kB |
+## 7. Live source health (`python scripts/source_health.py`)
 
-### `ingestion_errors` (all runs today)
-
-| source | error_type | count |
-|--------|-----------|------:|
-| CIRCL | rate_limited | 3 |
-
-(Run-1 NVD 503 errors were on the earlier Docker database, since replaced.)
-
-### `request_log`
-
-| status | requests | avg latency | max latency |
-|-------:|---------:|------------:|------------:|
-| 200 | 534 | 2 ms | 101 ms |
-| 404 | 3 | 35 ms | 55 ms |
+All 7 sources healthy; fetch times 0.6–3.8 s each. The same script runs
+hourly in GitHub Actions (`.github/workflows/source-health.yml`).
 
 ## Environment
 
 - PostgreSQL 16.10, portable binaries at `D:\PostgreSQL\16`, Windows service `postgresql-16-D`
-- Python 3.13 virtualenv, packages pinned in `requirements.txt`
-- No containers used
+- Python 3.12 virtualenv, packages pinned in `requirements.txt`
+- No containers used locally (CI uses GitHub's own Postgres service container)
