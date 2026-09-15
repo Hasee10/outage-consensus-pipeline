@@ -59,8 +59,10 @@ confidence 0.93, verified**, laggards listed as rejected.
 | 5 | outage-pro parser fixed for `<0.01%` rows (254/254 counties) | conf 0.88, verified, 0 errors |
 | 6 (later that day) | Austin Energy developed outages and, having no county layer, was reported as `bad_schema` — exactly as designed (named in warnings, snapshot still verified from the other six). Fix: single-county utilities (Austin → Travis, CPS → Bexar) now attribute their total to the home county with the ETA from their ZIP/district layer. | 7/7 ok, 40 tests |
 
-No source failed during any pass today, so `ingestion_errors` is empty; the
-failover paths are exercised by the test suite instead.
+The only failure of the day was run 6 (Austin Energy, `bad_schema`, one row
+in `ingestion_errors`) — a live demonstration of the failover path: the
+snapshot was still written and verified from the other six sources, with the
+failure named in `warnings`.
 
 ## 3. API (`py -m uvicorn app.main:app`)
 
@@ -104,7 +106,7 @@ run purged nothing because everything was younger than its TTL.
 | `raw_ingests` | 7 rows (one per source, latest pass): Oncor JSON 58 kB, CPS 9 kB, TNMP 3 kB, Austin 1.6 kB; aggregators stored as extracted data + page fingerprint (4–6 kB each) |
 | `consensus_snapshots` | 1 (newest), `stale = false` |
 | `area_rollups` | 276 rows, 143 counties |
-| `ingestion_errors` | 0 |
+| `ingestion_errors` | 1 (AUSTIN_ENERGY · bad_schema, run 6 — see above) |
 | `request_log` | 2,149 × HTTP 200 (avg 2 ms), 19 × HTTP 404 (avg 23 ms) |
 
 ## 7. Live source health (`python scripts/source_health.py`)
